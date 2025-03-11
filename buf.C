@@ -65,44 +65,113 @@ BufMgr::~BufMgr() {
 
 const Status BufMgr::allocBuf(int & frame) 
 {
+    int numScans = 0;
+    // scan until candidate found
+    while (true) {
+        advanceClock();  
+        // move hand
+        BufDesc* desc = &bufTable[clockHand];
 
+        if (desc->pinCnt > 0) {
+            // cant repalce pin page
+        } else if (desc->refbit) {
+            // clear ref
+            desc->refbit = false;
+        } else {
+            // found clear candidate
+            if (desc->valid) {
+                // dirty
+                if (desc->dirty) {
+                    Status s = desc->file->writePage(desc->pageNo, &(bufPool[clockHand]));
+                    if (s != OK) return s;
+                    bufStats.diskwrites++;
+                    desc->dirty = false;
+                }
+                // remove mapping
+                Status s = hashTable->remove(desc->file, desc->pageNo);
+                if (s != OK) return s;
+            }
+            // clear descriptor
+            desc->Clear();
+            frame = clockHand;
+            return OK;
+        }
+        numScans++;
 
-
-
-
-
+        // all frame spinned case
+        if (numScans >= 2 * numBufs)
+            return BUFFEREXCEEDED;
+    }
 }
-
 	
-const Status BufMgr::readPage(File* file, const int PageNo, Page*& page)
+const Status BufMgr::readPage(File* file, const int pageNo, Page*& page)
 {
-
-
-
-
-
+    int frame;
+    // page already in buffer pool
+    Status s = hashTable->lookup(file, pageNo, frame);
+    if (s == OK) {
+        // update pin and refbit
+        BufDesc* desc = &bufTable[frame];
+        desc->pinCnt++;
+        desc->refbit = true;
+        page = &bufPool[frame];
+        return OK;
+    }
+    else if (s == HASHNOTFOUND) {
+        // page not in buffer
+        int frameNum;
+        s = allocBuf(frameNum);
+        if (s != OK) return s;
+        // read from disk to frae
+        s = file->readPage(pageNo, &bufPool[frameNum]);
+        if (s != OK) return s;
+        // insert mapping into hash
+        s = hashTable->insert(file, pageNo, frameNum);
+        if (s != OK) return s;
+        // set buffer des
+        bufTable[frameNum].Set(file, pageNo);
+        page = &bufPool[frameNum];
+        bufStats.diskreads++;
+        return OK;
+    }
+    return s;
 }
 
 
-const Status BufMgr::unPinPage(File* file, const int PageNo, 
-			       const bool dirty) 
+const Status BufMgr::unPinPage(File* file, const int pageNo, const bool dirty)
 {
-
-
-
-
-
+    int frame;
+    Status s = hashTable->lookup(file, pageNo, frame);
+    if (s != OK) return s;  
+    //not in buffer pool
+    BufDesc* desc = &bufTable[frame];
+    if (desc->pinCnt <= 0)
+        return PAGENOTPINNED;
+    desc->pinCnt--;
+    if (dirty)
+        desc->dirty = true;
+    return OK;
 }
 
-const Status BufMgr::allocPage(File* file, int& pageNo, Page*& page) 
+const Status BufMgr::allocPage(File* file, int& pageNo, Page*& page)
 {
-
-
-
-
-
-
-
+    // new page
+    Status s = file->allocatePage(pageNo);
+    if (s != OK) return s;
+    // new buffer 
+    int frame;
+    s = allocBuf(frame);
+    if (s != OK) return s;
+    // insert into hash
+    s = hashTable->insert(file, pageNo, frame);
+    if (s != OK) return s;
+    // new desc
+    bufTable[frame].Set(file, pageNo);
+    // clear page
+    memset(&bufPool[frame], 0, sizeof(Page));
+    page = &bufPool[frame];
+    bufStats.diskreads++;
+    return OK;
 }
 
 const Status BufMgr::disposePage(File* file, const int pageNo) 
