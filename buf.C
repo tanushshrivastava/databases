@@ -1,3 +1,6 @@
+// G25 
+// Tanush Shrivastava, Sashenka Gamage, Bani Gulati, Nicholas Vander Woude
+
 #include <memory.h>
 #include <unistd.h>
 #include <errno.h>
@@ -63,54 +66,79 @@ BufMgr::~BufMgr() {
 }
 
 
+/*
+ * Function: allocBuf
+ * ------------------
+ * Allocates a buffer frame using the clock replacement policy.
+ * 
+ * Parameters:
+ *  - frame: reference to an integer where the allocated frame number will be stored.
+ * 
+ * Returns:
+ *  - OK on success.
+ *  - BUFFEREXCEEDED if no frame is available after scanning all frames twice.
+ */
 const Status BufMgr::allocBuf(int & frame) 
 {
     int numScans = 0;
-    // scan until candidate found
+    // Scan until a candidate frame is found
     while (true) {
-        advanceClock();  
-        // move hand
+        advanceClock();  // Move clock hand
         BufDesc* desc = &bufTable[clockHand];
 
         if (desc->pinCnt > 0) {
-            // cant repalce pin page
+            // Cannot replace a pinned page
         } else if (desc->refbit) {
-            // clear ref
+            // Clear reference bit and continue scanning
             desc->refbit = false;
         } else {
-            // found clear candidate
+            // Found a replaceable candidate
             if (desc->valid) {
-                // dirty
+                // Write back to disk if dirty
                 if (desc->dirty) {
                     Status s = desc->file->writePage(desc->pageNo, &(bufPool[clockHand]));
                     if (s != OK) return s;
                     bufStats.diskwrites++;
                     desc->dirty = false;
                 }
-                // remove mapping
+                // Remove mapping from hash table
                 Status s = hashTable->remove(desc->file, desc->pageNo);
                 if (s != OK) return s;
             }
-            // clear descriptor
+            // Clear descriptor and allocate frame
             desc->Clear();
             frame = clockHand;
             return OK;
         }
         numScans++;
 
-        // all frame spinned case
+        // If all frames have been scanned twice, return BUFFEREXCEEDED
         if (numScans >= 2 * numBufs)
             return BUFFEREXCEEDED;
     }
 }
-	
+
+/*
+ * Function: readPage
+ * -------------------
+ * Reads a page from disk into the buffer pool.
+ * 
+ * Parameters:
+ *  - file: pointer to the file containing the page.
+ *  - pageNo: the page number to read.
+ *  - page: reference to a Page pointer that will point to the buffer location.
+ * 
+ * Returns:
+ *  - OK on success.
+ *  - Error status if any operation fails.
+ */
 const Status BufMgr::readPage(File* file, const int pageNo, Page*& page)
 {
     int frame;
-    // page already in buffer pool
+    // Check if the page is already in the buffer pool
     Status s = hashTable->lookup(file, pageNo, frame);
     if (s == OK) {
-        // update pin and refbit
+        // Update pin count and reference bit
         BufDesc* desc = &bufTable[frame];
         desc->pinCnt++;
         desc->refbit = true;
@@ -118,17 +146,17 @@ const Status BufMgr::readPage(File* file, const int pageNo, Page*& page)
         return OK;
     }
     else if (s == HASHNOTFOUND) {
-        // page not in buffer
+        // Page is not in buffer, allocate a new buffer frame
         int frameNum;
         s = allocBuf(frameNum);
         if (s != OK) return s;
-        // read from disk to frae
+        // Read page from disk into allocated frame
         s = file->readPage(pageNo, &bufPool[frameNum]);
         if (s != OK) return s;
-        // insert mapping into hash
+        // Insert mapping into hash table
         s = hashTable->insert(file, pageNo, frameNum);
         if (s != OK) return s;
-        // set buffer des
+        // Set buffer descriptor
         bufTable[frameNum].Set(file, pageNo);
         page = &bufPool[frameNum];
         bufStats.diskreads++;
@@ -137,42 +165,77 @@ const Status BufMgr::readPage(File* file, const int pageNo, Page*& page)
     return s;
 }
 
-
+/*
+ * Function: unPinPage
+ * --------------------
+ * Unpins a page, reducing its pin count and marking it as dirty if specified.
+ * 
+ * Parameters:
+ *  - file: pointer to the file containing the page.
+ *  - pageNo: the page number to unpin.
+ *  - dirty: boolean flag indicating whether the page has been modified.
+ * 
+ * Returns:
+ *  - OK on success.
+ *  - PAGENOTPINNED if the page is not pinned.
+ */
 const Status BufMgr::unPinPage(File* file, const int pageNo, const bool dirty)
 {
     int frame;
     Status s = hashTable->lookup(file, pageNo, frame);
-    if (s != OK) return s;  
-    //not in buffer pool
+    if (s != OK) return s;  // Page not found in buffer pool
+    
     BufDesc* desc = &bufTable[frame];
     if (desc->pinCnt <= 0)
         return PAGENOTPINNED;
+    
     desc->pinCnt--;
     if (dirty)
         desc->dirty = true;
+    
     return OK;
 }
 
+/*
+ * Function: allocPage
+ * --------------------
+ * Allocates a new page in the file and assigns a buffer frame for it.
+ * 
+ * Parameters:
+ *  - file: pointer to the file where the page will be allocated.
+ *  - pageNo: reference to an integer where the new page number will be stored.
+ *  - page: reference to a Page pointer that will point to the buffer location.
+ * 
+ * Returns:
+ *  - OK on success.
+ *  - Error status if any operation fails.
+ */
 const Status BufMgr::allocPage(File* file, int& pageNo, Page*& page)
 {
-    // new page
+    // Allocate a new page in the file
     Status s = file->allocatePage(pageNo);
     if (s != OK) return s;
-    // new buffer 
+    
+    // Allocate a new buffer frame
     int frame;
     s = allocBuf(frame);
     if (s != OK) return s;
-    // insert into hash
+    
+    // Insert the new page into the hash table
     s = hashTable->insert(file, pageNo, frame);
     if (s != OK) return s;
-    // new desc
+    
+    // Set up the buffer descriptor
     bufTable[frame].Set(file, pageNo);
-    // clear page
+    
+    // Initialize the new page with zero values
     memset(&bufPool[frame], 0, sizeof(Page));
+    
     page = &bufPool[frame];
     bufStats.diskreads++;
     return OK;
 }
+
 
 const Status BufMgr::disposePage(File* file, const int pageNo) 
 {
